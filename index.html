@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JRmeet - 实时视频通话</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; text-align: center; background-color: #f0f2f5; margin: 0; padding: 20px; }
+        h1 { color: #333; }
+        .video-container { display: flex; justify-content: center; gap: 20px; margin-top: 20px; flex-wrap: wrap; }
+        video { background: #000; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 400px; max-width: 100%; }
+        .controls { margin-top: 20px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; border: none; border-radius: 8px; background-color: #007bff; color: white; transition: background 0.3s; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <h1>JRmeet</h1>
+    <div class="controls">
+        <button id="startButton">打开摄像头</button>
+        <button id="callButton" disabled>发起通话</button>
+    </div>
+
+    <div class="video-container">
+        <div>
+            <h3>我</h3>
+            <video id="localVideo" autoplay muted playsinline></video>
+        </div>
+        <div>
+            <h3>对方</h3>
+            <video id="remoteVideo" autoplay playsinline></video>
+        </div>
+    </div>
+
+    <script>
+        // 替换为你的 Cloudflare Worker 地址，注意是 wss 协议
+        const SIGNALING_URL = 'wss://YOUR_WORKER_URL.workers.dev/room/test-room-1'; 
+        
+        let localStream;
+        let peerConnection;
+        let ws;
+
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const startButton = document.getElementById('startButton');
+        const callButton = document.getElementById('callButton');
+
+        // WebRTC 免费公共 STUN 服务器 (帮助穿透 NAT)
+        const configuration = {
+            'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]
+        };
+
+        // 1. 初始化 WebSocket 信令连接
+        function connectSignaling() {
+            ws = new WebSocket(SIGNALING_URL);
+            
+            ws.onmessage = async (message) => {
+                const data = JSON.parse(message.data);
+                
+                if (!peerConnection) createPeerConnection();
+
+                // 处理远端发来的 Offer
+                if (data.type === 'offer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    ws.send(JSON.stringify(peerConnection.localDescription));
+                } 
+                // 处理远端发来的 Answer
+                else if (data.type === 'answer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+                } 
+                // 处理 ICE 候选者 (网络通路配置)
+                else if (data.type === 'candidate') {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            };
+
+            ws.onopen = () => console.log('✅ 信令服务器连接成功');
+            ws.onerror = (e) => console.error('❌ WebSocket 错误', e);
+        }
+
+        // 2. 获取本地音视频流
+        startButton.onclick = async () => {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+                callButton.disabled = false;
+                startButton.disabled = true;
+                connectSignaling(); // 拿到摄像头权限后连接信令服务器
+            } catch (error) {
+                console.error('获取媒体设备失败:', error);
+                alert('无法访问摄像头或麦克风');
+            }
+        };
+
+        // 3. 创建 WebRTC 核心连接对象
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+
+            // 将本地流的轨道添加到连接中
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            // 监听远端流并显示在 UI 上
+            peerConnection.ontrack = event => {
+                remoteVideo.srcObject = event.streams[0];
+            };
+
+            // 收集到本地 ICE 候选者时，通过 WebSocket 发送给对方
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({ 'type': 'candidate', 'candidate': event.candidate }));
+                }
+            };
+        }
+
+        // 4. 发起通话 (创建 Offer 并发送)
+        callButton.onclick = async () => {
+            createPeerConnection();
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            ws.send(JSON.stringify(peerConnection.localDescription));
+            callButton.disabled = true;
+        };
+    </script>
+</body>
+</html>
